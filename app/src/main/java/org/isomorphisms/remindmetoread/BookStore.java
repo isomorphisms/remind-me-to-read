@@ -8,20 +8,29 @@ import android.database.sqlite.SQLiteOpenHelper;
 import java.util.ArrayList;
 import java.util.List;
 
-/** All reading records remain on-device. Session rows preserve the source of totals. */
+/** Local reading history. Saved position and deliberate bookmarks are independent. */
 public final class BookStore extends SQLiteOpenHelper {
     public static final int EPUB = 0;
     public static final int PAPER = 1;
+    public static final int TEXT = 2;
 
     public static final class Book {
         public long id, addedAt, lastReadAt, totalSeconds, readingSince;
         public String title, author, epubPath;
-        public int kind, chapter, scrollY, currentPage, totalPages;
+        public int kind, chapter, scrollY, charOffset, contentLength, currentPage, totalPages;
         public boolean isPaper() { return kind == PAPER; }
+        public boolean isText() { return kind == TEXT; }
+        public boolean isDigital() { return kind != PAPER; }
+    }
+
+    public static final class Mark {
+        public long id, bookId, savedAt;
+        public int chapter, charOffset, page;
+        public String label;
     }
 
     public BookStore(Context context) {
-        super(context, "reading.sqlite", null, 1);
+        super(context, "reading.sqlite", null, 2);
     }
 
     @Override public void onCreate(SQLiteDatabase db) {
@@ -29,11 +38,16 @@ public final class BookStore extends SQLiteOpenHelper {
                 "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 "title TEXT NOT NULL, author TEXT NOT NULL, kind INTEGER NOT NULL," +
                 "epub_path TEXT, chapter INTEGER NOT NULL DEFAULT 0," +
-                "scroll_y INTEGER NOT NULL DEFAULT 0, current_page INTEGER NOT NULL DEFAULT 0," +
-                "total_pages INTEGER NOT NULL DEFAULT 0," +
+                "scroll_y INTEGER NOT NULL DEFAULT 0, char_offset INTEGER NOT NULL DEFAULT 0," +
+                "content_length INTEGER NOT NULL DEFAULT 0," +
+                "current_page INTEGER NOT NULL DEFAULT 0, total_pages INTEGER NOT NULL DEFAULT 0," +
                 "added_ms INTEGER NOT NULL, last_read_ms INTEGER NOT NULL DEFAULT 0," +
-                "total_seconds INTEGER NOT NULL DEFAULT 0," +
-                "reading_since_ms INTEGER NOT NULL DEFAULT 0)");
+                "total_seconds INTEGER NOT NULL DEFAULT 0, reading_since_ms INTEGER NOT NULL DEFAULT 0)");
+        createSessions(db);
+        createMarks(db);
+    }
+
+    private static void createSessions(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE sessions (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 "book_id INTEGER NOT NULL REFERENCES books(id)," +
@@ -42,13 +56,39 @@ public final class BookStore extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX sessions_book ON sessions(book_id, started_ms)");
     }
 
+    private static void createMarks(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE bookmarks (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                "book_id INTEGER NOT NULL REFERENCES books(id)," +
+                "chapter INTEGER NOT NULL DEFAULT 0," +
+                "char_offset INTEGER NOT NULL DEFAULT 0," +
+                "page INTEGER NOT NULL DEFAULT 0," +
+                "label TEXT NOT NULL DEFAULT ''," +
+                "saved_ms INTEGER NOT NULL)");
+        db.execSQL("CREATE INDEX bookmarks_book ON bookmarks(book_id, saved_ms DESC)");
+    }
+
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        throw new IllegalStateException("No database upgrade defined");
+        if (oldVersion == 1 && newVersion >= 2) {
+            // Preserve existing books, reading sessions, time totals and EPUB scroll positions.
+            db.execSQL("ALTER TABLE books ADD COLUMN char_offset INTEGER NOT NULL DEFAULT 0");
+            db.execSQL("ALTER TABLE books ADD COLUMN content_length INTEGER NOT NULL DEFAULT 0");
+            createMarks(db);
+        } else {
+            throw new IllegalStateException("Unsupported reading database upgrade: " + oldVersion);
+        }
     }
 
     public synchronized long addEpub(String title, String author, String privatePath) {
         ContentValues values = initial(title, author, EPUB);
         values.put("epub_path", privatePath);
+        return getWritableDatabase().insertOrThrow("books", null, values);
+    }
+
+    public synchronized long addText(String title, String privatePath, int characterCount) {
+        ContentValues values = initial(title, "", TEXT);
+        values.put("epub_path", privatePath); // existing private-document path column
+        values.put("content_length", Math.max(0, characterCount));
         return getWritableDatabase().insertOrThrow("books", null, values);
     }
 
@@ -58,7 +98,7 @@ public final class BookStore extends SQLiteOpenHelper {
         return getWritableDatabase().insertOrThrow("books", null, values);
     }
 
-    private ContentValues initial(String title, String author, int kind) {
+    private static ContentValues initial(String title, String author, int kind) {
         ContentValues values = new ContentValues();
         values.put("title", title.trim());
         values.put("author", author.trim());
@@ -92,6 +132,8 @@ public final class BookStore extends SQLiteOpenHelper {
         b.epubPath = word(c, "epub_path");
         b.chapter = (int) number(c, "chapter");
         b.scrollY = (int) number(c, "scroll_y");
+        b.charOffset = (int) number(c, "char_offset");
+        b.contentLength = (int) number(c, "content_length");
         b.currentPage = (int) number(c, "current_page");
         b.totalPages = (int) number(c, "total_pages");
         b.addedAt = number(c, "added_ms");
@@ -109,11 +151,13 @@ public final class BookStore extends SQLiteOpenHelper {
         return value == null ? "" : value;
     }
 
-    public synchronized void bookmarkEpub(long id, int chapter, int scrollY) {
+    /** Stable position is a UTF-16 character offset, independent of rendered font/viewport. */
+    public synchronized void position(long id, int chapter, int offset, int fallbackScrollY) {
         ContentValues values = new ContentValues();
         values.put("chapter", Math.max(0, chapter));
-        values.put("scroll_y", Math.max(0, scrollY));
-        getWritableDatabase().update("books", values, "id=? AND kind=0",
+        values.put("char_offset", Math.max(0, offset));
+        values.put("scroll_y", Math.max(0, fallbackScrollY));
+        getWritableDatabase().update("books", values, "id=? AND kind!=1",
                 new String[]{Long.toString(id)});
     }
 
@@ -126,7 +170,44 @@ public final class BookStore extends SQLiteOpenHelper {
                 new String[]{Long.toString(id)});
     }
 
-    /** EPUB sessions use monotonic elapsed time and are committed on pause. */
+    public synchronized long addMark(long bookId, int chapter, int offset, int page, String label) {
+        if (get(bookId) == null) throw new IllegalArgumentException("Unknown book");
+        ContentValues values = new ContentValues();
+        values.put("book_id", bookId);
+        values.put("chapter", Math.max(0, chapter));
+        values.put("char_offset", Math.max(0, offset));
+        values.put("page", Math.max(0, page));
+        values.put("label", label == null ? "" : label);
+        values.put("saved_ms", System.currentTimeMillis());
+        return getWritableDatabase().insertOrThrow("bookmarks", null, values);
+    }
+
+    public synchronized List<Mark> marks(long bookId) {
+        ArrayList<Mark> result = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT * FROM bookmarks WHERE book_id=? ORDER BY saved_ms DESC, id DESC",
+                new String[]{Long.toString(bookId)})) {
+            while (c.moveToNext()) {
+                Mark m = new Mark();
+                m.id = number(c, "id");
+                m.bookId = number(c, "book_id");
+                m.chapter = (int) number(c, "chapter");
+                m.charOffset = (int) number(c, "char_offset");
+                m.page = (int) number(c, "page");
+                m.savedAt = number(c, "saved_ms");
+                m.label = word(c, "label");
+                result.add(m);
+            }
+        }
+        return result;
+    }
+
+    public synchronized void deleteMark(long bookId, long markId) {
+        getWritableDatabase().delete("bookmarks", "book_id=? AND id=?",
+                new String[]{Long.toString(bookId), Long.toString(markId)});
+    }
+
+    /** EPUB/TXT foreground sessions use monotonic elapsed time and commit on pause. */
     public synchronized void recordForeground(long id, long startedWallMs, long elapsedMs) {
         long seconds = Math.max(0, elapsedMs / 1000);
         if (seconds == 0) return;

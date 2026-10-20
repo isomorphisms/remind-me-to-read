@@ -7,6 +7,8 @@ import android.app.TimePickerDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
@@ -19,6 +21,11 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.io.InputStream;
 import java.text.DateFormat;
 import java.util.List;
@@ -27,6 +34,7 @@ import java.util.UUID;
 /** Native Android shell. No account, analytics, or access to other apps' reading data. */
 public final class MainActivity extends Activity {
     private static final int OPEN_EPUB = 101;
+    private static final int EXPORT_MARKERS = 102;
     private BookStore store;
 
     @Override public void onCreate(Bundle state) {
@@ -71,8 +79,9 @@ public final class MainActivity extends Activity {
 
         root.addView(label("Remind Me to Read", 27));
         root.addView(label("Local reading history — EPUB and paper", 14));
-        root.addView(button("Import an EPUB", this::chooseEpub));
+        root.addView(button("Import an EPUB or TXT file", this::chooseEpub));
         root.addView(button("Add a physical book", this::addPaperDialog));
+        root.addView(button("Export reading progress as TXT", this::exportMarkers));
         boolean enabled = Reminder.enabled(this);
         root.addView(button(enabled ? "Daily reminder: on (change or disable)" :
                 "Enable a daily reading reminder", this::reminderDialog));
@@ -84,6 +93,8 @@ public final class MainActivity extends Activity {
         for (BookStore.Book book : books) {
             String subtitle = book.isPaper()
                     ? "Paper · page " + book.currentPage + " / " + book.totalPages
+                    : book.isText()
+                    ? "TXT · " + (PlainText.perMille(book.charOffset, book.contentLength) / 10.0) + "% read"
                     : "EPUB · chapter " + (book.chapter + 1);
             String duration = duration(book.totalSeconds);
             String last = book.lastReadAt == 0 ? "Not yet read"
@@ -120,22 +131,38 @@ public final class MainActivity extends Activity {
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType("*/*");
         i.putExtra(Intent.EXTRA_MIME_TYPES,
-                new String[]{"application/epub+zip", "application/octet-stream"});
+                new String[]{"application/epub+zip", "text/plain", "application/octet-stream"});
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         startActivityForResult(i, OPEN_EPUB);
     }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != OPEN_EPUB || result != RESULT_OK || data == null || data.getData() == null) return;
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        if (request == EXPORT_MARKERS) {
+            exportTo(data.getData());
+            return;
+        }
+        if (request != OPEN_EPUB) return;
         Uri uri = data.getData();
-        Toast.makeText(this, "Importing EPUB…", Toast.LENGTH_SHORT).show();
+        String displayName = displayName(uri);
+        String mimeType = getContentResolver().getType(uri);
+        boolean plain = displayName.toLowerCase(Locale.ROOT).endsWith(".txt") ||
+                "text/plain".equalsIgnoreCase(mimeType);
+        boolean epub = displayName.toLowerCase(Locale.ROOT).endsWith(".epub") ||
+                "application/epub+zip".equalsIgnoreCase(mimeType);
+        if (!plain && !epub) {
+            new AlertDialog.Builder(this).setMessage("Choose a .txt or .epub document.")
+                    .setPositiveButton("OK", null).show();
+            return;
+        }
+        Toast.makeText(this, "Importing " + (plain ? "TXT" : "EPUB") + "…", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             File target = null;
             try {
                 File directory = new File(getFilesDir(), "epubs");
                 if (!directory.exists() && !directory.mkdirs()) throw new Exception("Cannot create books folder");
-                target = new File(directory, UUID.randomUUID() + ".epub");
+                target = new File(directory, UUID.randomUUID() + (plain ? ".txt" : ".epub"));
                 try (InputStream in = getContentResolver().openInputStream(uri);
                      FileOutputStream out = new FileOutputStream(target)) {
                     if (in == null) throw new Exception("Cannot read selected document");
@@ -144,13 +171,21 @@ public final class MainActivity extends Activity {
                     int n;
                     while ((n = in.read(buffer)) != -1) {
                         bytes += n;
-                        if (bytes > 100L * 1024 * 1024) throw new Exception("EPUB exceeds 100 MiB");
+                        if (bytes > (plain ? PlainText.MAX_BYTES : 100L * 1024 * 1024))
+                            throw new Exception(plain ? "TXT exceeds 6 MiB" : "EPUB exceeds 100 MiB");
                         out.write(buffer, 0, n);
                     }
                 }
-                Epub.Info info = Epub.inspect(target);
-                long bookId = store.addEpub(info.title, info.author, target.getAbsolutePath());
-                runOnUiThread(() -> { showHome(); open(bookId); });
+                long bookId;
+                if (plain) {
+                    String words = PlainText.load(target);
+                    String title = displayName.replaceFirst("(?i)\\.txt$", "");
+                    bookId = store.addText(title, target.getAbsolutePath(), words.length());
+                } else {
+                    Epub.Info info = Epub.inspect(target);
+                    bookId = store.addEpub(info.title, info.author, target.getAbsolutePath());
+                }
+                runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) { showHome(); open(bookId); } });
             } catch (Exception ex) {
                 if (target != null) target.delete();
                 String message = ex.getMessage() == null ? "Cannot import this EPUB" : ex.getMessage();
@@ -158,6 +193,65 @@ public final class MainActivity extends Activity {
                         .setMessage(message).setPositiveButton("OK", null).show());
             }
         }, "epub-import").start();
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String name = c.getString(0);
+                if (name != null && !name.isEmpty()) return name;
+            }
+        } catch (Exception ignored) { }
+        return "Untitled";
+    }
+
+    private void exportMarkers() {
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_TITLE, "reading-progress.txt");
+        startActivityForResult(i, EXPORT_MARKERS);
+    }
+
+    private void exportTo(Uri uri) {
+        StringBuilder result = new StringBuilder("Remind Me to Read — reading progress\n");
+        result.append("Exported: ").append(new Date()).append("\n\n");
+        for (BookStore.Book b : store.all()) {
+            result.append("Title: ").append(b.title).append("\n");
+            result.append("Author: ").append(b.author).append("\n");
+            if (b.isPaper()) {
+                result.append("Physical pages: ").append(b.currentPage)
+                        .append(" / ").append(b.totalPages).append("\n");
+            } else if (b.isText()) {
+                result.append("TXT character position: ").append(b.charOffset)
+                        .append(" / ").append(b.contentLength).append("\n");
+                result.append("Progress: ").append(
+                        PlainText.perMille(b.charOffset, b.contentLength) / 10.0).append("%\n");
+            } else {
+                result.append("EPUB chapter: ").append(b.chapter + 1)
+                        .append("\nCharacter position in chapter: ").append(b.charOffset).append("\n");
+            }
+            result.append("Last read (epoch milliseconds, 0 if never): ")
+                    .append(b.lastReadAt).append("\n");
+            result.append("Total reading seconds: ").append(b.totalSeconds).append("\n");
+            for (BookStore.Mark mark : store.marks(b.id)) {
+                result.append("Bookmark: ").append(mark.label)
+                        .append(" | chapter=").append(mark.chapter + 1)
+                        .append(" | character=").append(mark.charOffset)
+                        .append(" | paper-page=").append(mark.page)
+                        .append(" | saved-ms=").append(mark.savedAt).append("\n");
+            }
+            result.append("\n");
+        }
+        try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+            if (out == null) throw new Exception("Destination is unavailable");
+            out.write(result.toString().getBytes(StandardCharsets.UTF_8));
+            Toast.makeText(this, "Progress TXT saved", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            new AlertDialog.Builder(this).setTitle("Export failed").setMessage(e.getMessage())
+                    .setPositiveButton("OK", null).show();
+        }
     }
 
     private EditText field(String hint) {

@@ -78,6 +78,8 @@ public final class Reminder {
             BookStore.Book book = null;
             for (BookStore.Book candidate : books) {
                 if (candidate.isPaper() && candidate.currentPage >= candidate.totalPages) continue;
+                if (candidate.isText() && candidate.contentLength > 0 &&
+                        candidate.charOffset >= candidate.contentLength) continue;
                 book = candidate;
                 if (candidate.lastReadAt > 0) break;
             }

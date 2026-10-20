@@ -19,9 +19,12 @@ public final class GptOss {
                 || url.getUserInfo() != null)
             throw new IllegalArgumentException("Supply an HTTPS /v1/chat/completions URL");
         String facts = "Book: " + book.title + "\nAuthor: " + book.author +
-                "\nType: " + (book.isPaper() ? "physical" : "EPUB") +
+                "\nType: " + (book.isPaper() ? "physical" : book.isText() ? "TXT" : "EPUB") +
                 "\nPosition: " + (book.isPaper() ? "page " + book.currentPage +
-                " of " + book.totalPages : "chapter " + (book.chapter + 1)) +
+                " of " + book.totalPages : book.isText()
+                ? (PlainText.perMille(book.charOffset, book.contentLength) / 10.0) +
+                  "% (" + book.charOffset + "/" + book.contentLength + " characters)"
+                : "chapter " + (book.chapter + 1) + ", character " + book.charOffset) +
                 "\nMinutes read: " + (book.totalSeconds / 60) +
                 "\nLast read (Unix milliseconds, 0 if never): " + book.lastReadAt;
         JSONArray messages = new JSONArray();

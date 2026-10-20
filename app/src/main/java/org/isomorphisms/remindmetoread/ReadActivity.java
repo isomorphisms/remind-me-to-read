@@ -3,29 +3,38 @@ package org.isomorphisms.remindmetoread;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.text.InputType;
+import android.text.Layout;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
-/** EPUB foreground sessions are automatic; physical sessions are explicitly started/stopped. */
+/** Reader with stable character-offset progress and independent manual page markers. */
 public final class ReadActivity extends Activity {
     private BookStore store;
     private BookStore.Book book;
     private ScrollView scroll;
-    private TextView content;
-    private TextView location;
+    private TextView content, location;
+    private SeekBar progress;
     private List<String> chapters = new ArrayList<>();
-    private int chapter, savedScrollY, readRequest;
+    private String documentText = "";
+    private int chapter, savedOffset, legacyScrollY, requestId;
+    private boolean restoring = true, loaded;
     private long foregroundSinceMs, foregroundSinceElapsed;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable deferredPositionSave = this::remember;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -35,9 +44,11 @@ public final class ReadActivity extends Activity {
         if (book.isPaper()) showPaper();
         else {
             chapter = book.chapter;
-            savedScrollY = book.scrollY;
-            showEpub();
-            loadSpine();
+            savedOffset = book.charOffset;
+            legacyScrollY = book.scrollY;
+            showDigital();
+            if (book.isText()) loadText();
+            else loadEpubSpine();
         }
     }
 
@@ -64,7 +75,7 @@ public final class ReadActivity extends Activity {
     private LinearLayout column() {
         LinearLayout result = new LinearLayout(this);
         result.setOrientation(LinearLayout.VERTICAL);
-        result.setPadding(px(12), px(12), px(12), px(12));
+        result.setPadding(px(8), px(8), px(8), px(8));
         return result;
     }
 
@@ -84,7 +95,7 @@ public final class ReadActivity extends Activity {
         page.setHint("Current page");
         page.setText(Integer.toString(book.currentPage));
         root.addView(page);
-        root.addView(button("Save page / bookmark", () -> {
+        root.addView(button("Save current page", () -> {
             try {
                 int next = Integer.parseInt(page.getText().toString().trim());
                 if (next < 0 || next > book.totalPages) {
@@ -92,12 +103,18 @@ public final class ReadActivity extends Activity {
                     return;
                 }
                 store.page(book.id, next);
-                Toast.makeText(this, "Page saved", Toast.LENGTH_SHORT).show();
                 showPaper();
             } catch (NumberFormatException e) {
                 page.setError("Enter a page number");
             }
         }));
+        root.addView(button("★ Bookmark this page", () -> {
+            savePaperPage(page);
+            BookStore.Book current = store.get(book.id);
+            store.addMark(book.id, 0, 0, current.currentPage, "Page " + current.currentPage);
+            Toast.makeText(this, "Bookmark saved", Toast.LENGTH_SHORT).show();
+        }));
+        root.addView(button("View bookmarks", this::showMarks));
         boolean running = book.readingSince > 0;
         root.addView(text(running
                 ? "Session running since " + android.text.format.DateFormat.format("MMM d, h:mm a", book.readingSince)
@@ -110,34 +127,72 @@ public final class ReadActivity extends Activity {
         root.addView(button("Back to library", this::finish));
     }
 
-    private void showEpub() {
+    private void savePaperPage(EditText page) {
+        try {
+            int current = Integer.parseInt(page.getText().toString().trim());
+            if (current >= 0 && current <= book.totalPages) store.page(book.id, current);
+        } catch (NumberFormatException ignored) { }
+    }
+
+    private void showDigital() {
         LinearLayout root = column();
         setContentView(root);
-        root.addView(text(book.title, 22));
-        location = text("Loading EPUB…", 14);
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        TextView title = text(book.title, 21);
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        top.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        top.addView(button("★", this::addDigitalMark));
+        top.addView(button("Marks", this::showMarks));
+        root.addView(top);
+
+        location = text("Loading…", 13);
         root.addView(location);
-        LinearLayout controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
-        Button previous = button("◀ Previous", () -> switchChapter(chapter - 1));
-        Button next = button("Next ▶", () -> switchChapter(chapter + 1));
-        controls.addView(previous, new LinearLayout.LayoutParams(0, -2, 1));
-        controls.addView(next, new LinearLayout.LayoutParams(0, -2, 1));
-        root.addView(controls);
+
+        if (!book.isText()) {
+            LinearLayout controls = new LinearLayout(this);
+            controls.setOrientation(LinearLayout.HORIZONTAL);
+            controls.addView(button("◀ Previous chapter", () -> switchChapter(chapter - 1)),
+                    new LinearLayout.LayoutParams(0, -2, 1));
+            controls.addView(button("Next chapter ▶", () -> switchChapter(chapter + 1)),
+                    new LinearLayout.LayoutParams(0, -2, 1));
+            root.addView(controls);
+        }
 
         scroll = new ScrollView(this);
-        content = text("Reading file…", 19);
+        content = text("Loading document…", 18);
         content.setTextIsSelectable(true);
         content.setLineSpacing(px(4), 1.08f);
         scroll.addView(content);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        root.addView(button("Save bookmark", () -> {
+        progress = new SeekBar(this);
+        progress.setMax(1000);
+        progress.setContentDescription("Reading position in this document or chapter");
+        progress.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
+            @Override public void onProgressChanged(SeekBar seekBar, int value, boolean fromUser) { }
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                if (loaded) jumpTo(PlainText.offsetAt(seekBar.getProgress(), documentText.length()));
+            }
+        });
+        root.addView(progress);
+
+        scroll.setOnScrollChangeListener((v, sx, sy, ox, oy) -> {
+            if (!loaded || restoring) return;
+            showProgress();
+            handler.removeCallbacks(deferredPositionSave);
+            handler.postDelayed(deferredPositionSave, 1500);
+        });
+        root.addView(button("Save reading position", () -> {
             remember();
-            Toast.makeText(this, "Bookmark saved", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Position saved", Toast.LENGTH_SHORT).show();
         }));
     }
 
-    private void loadSpine() {
+    private void loadEpubSpine() {
         File file = new File(book.epubPath);
         new Thread(() -> {
             try {
@@ -146,7 +201,7 @@ public final class ReadActivity extends Activity {
                     if (isDestroyed() || isFinishing()) return;
                     chapters = info.chapters;
                     chapter = Math.min(Math.max(0, chapter), chapters.size() - 1);
-                    loadChapter();
+                    loadEpubChapter();
                 });
             } catch (Exception ex) {
                 error(ex);
@@ -154,65 +209,194 @@ public final class ReadActivity extends Activity {
         }, "epub-spine").start();
     }
 
-    private void switchChapter(int next) {
-        if (next < 0 || next >= chapters.size()) return;
-        remember();
-        chapter = next;
-        savedScrollY = 0;
-        store.bookmarkEpub(book.id, chapter, 0);
-        loadChapter();
+    private void loadText() {
+        ++requestId;
+        int expected = requestId;
+        new Thread(() -> {
+            try {
+                String words = PlainText.load(new File(book.epubPath));
+                runOnUiThread(() -> {
+                    if (isDestroyed() || isFinishing() || requestId != expected) return;
+                    display(words, expected);
+                });
+            } catch (Exception ex) { error(ex); }
+        }, "txt-reader").start();
     }
 
-    private void loadChapter() {
+    private void switchChapter(int next) {
+        if (book.isText() || next < 0 || next >= chapters.size()) return;
+        remember();
+        chapter = next;
+        savedOffset = 0;
+        legacyScrollY = 0;
+        loadEpubChapter();
+    }
+
+    private void loadEpubChapter() {
         if (chapters.isEmpty()) return;
-        int request = ++readRequest;
+        loaded = false;
+        restoring = true;
+        documentText = "";
+        int request = ++requestId;
         int expectedChapter = chapter;
-        int offset = savedScrollY;
-        location.setText("Chapter " + (chapter + 1) + " / " + chapters.size());
+        location.setText("Chapter " + (chapter + 1) + " of " + chapters.size() + " — loading…");
         content.setText("Loading chapter…");
-        scroll.scrollTo(0, 0);
         new Thread(() -> {
             try {
                 String words = Epub.chapterText(new File(book.epubPath), chapters.get(expectedChapter));
                 runOnUiThread(() -> {
-                    if (isDestroyed() || isFinishing() || readRequest != request) return;
-                    content.setText(words);
-                    scroll.post(() -> {
-                        if (readRequest == request) scroll.scrollTo(0, offset);
-                    });
+                    if (isDestroyed() || isFinishing() || requestId != request) return;
+                    display(words, request);
                 });
-            } catch (Exception ex) {
-                error(ex);
-            }
+            } catch (Exception ex) { error(ex); }
         }, "epub-chapter").start();
     }
 
+    private void display(String words, int request) {
+        restoring = true;
+        loaded = false;
+        documentText = words;
+        content.setText(words);
+        scroll.scrollTo(0, 0);
+        int targetOffset = Math.max(0, Math.min(savedOffset, words.length()));
+        int oldPixels = legacyScrollY;
+        scroll.post(() -> {
+            if (isDestroyed() || isFinishing() || request != requestId) return;
+            Layout layout = content.getLayout();
+            if (layout != null) {
+                int targetY = (targetOffset == 0 && oldPixels > 0)
+                        ? oldPixels : layout.getLineTop(layout.getLineForOffset(targetOffset));
+                scroll.scrollTo(0, Math.max(0, targetY));
+            }
+            savedOffset = targetOffset;
+            legacyScrollY = 0;
+            loaded = true;
+            restoring = false;
+            showProgress();
+        });
+    }
+
+    private int currentOffset() {
+        if (!loaded || content == null || scroll == null) return savedOffset;
+        Layout layout = content.getLayout();
+        if (layout == null || documentText.isEmpty()) return 0;
+        int maxY = Math.max(0, content.getHeight() - scroll.getHeight());
+        if (maxY > 0 && scroll.getScrollY() >= maxY - px(2)) return documentText.length();
+        int line = layout.getLineForVertical(Math.max(0, scroll.getScrollY()));
+        return Math.min(documentText.length(), layout.getLineStart(line));
+    }
+
+    private void showProgress() {
+        if (!loaded) return;
+        int position = currentOffset();
+        int perMille = PlainText.perMille(position, documentText.length());
+        int viewHeight = Math.max(1, scroll.getHeight());
+        int pages = Math.max(1, (content.getHeight() + viewHeight - 1) / viewHeight);
+        int page = Math.min(pages, 1 + scroll.getScrollY() / viewHeight);
+        String heading = book.isText()
+                ? "TXT · " + (perMille / 10.0) + "%"
+                : "Chapter " + (chapter + 1) + "/" + chapters.size() +
+                    " · " + (perMille / 10.0) + "% of chapter";
+        location.setText(heading + " · screen page ~" + page + "/" + pages);
+        progress.setProgress(perMille);
+    }
+
+    private void jumpTo(int offset) {
+        if (!loaded) return;
+        restoring = true;
+        savedOffset = Math.max(0, Math.min(offset, documentText.length()));
+        int request = requestId;
+        scroll.post(() -> {
+            if (isDestroyed() || isFinishing() || request != requestId) return;
+            Layout layout = content.getLayout();
+            if (layout != null) {
+                int targetY = layout.getLineTop(layout.getLineForOffset(savedOffset));
+                scroll.scrollTo(0, Math.max(0, targetY));
+            }
+            restoring = false;
+            showProgress();
+            remember();
+        });
+    }
+
     private void remember() {
-        if (book != null && !book.isPaper() && scroll != null && !chapters.isEmpty()) {
-            savedScrollY = Math.max(0, scroll.getScrollY());
-            store.bookmarkEpub(book.id, chapter, savedScrollY);
+        if (book == null || !book.isDigital() || !loaded || restoring) return;
+        savedOffset = currentOffset();
+        store.position(book.id, chapter, savedOffset, Math.max(0, scroll.getScrollY()));
+    }
+
+    private void addDigitalMark() {
+        if (!loaded) return;
+        int offset = currentOffset();
+        String label = book.isText()
+                ? "TXT " + (PlainText.perMille(offset, documentText.length()) / 10.0) + "%"
+                : "Chapter " + (chapter + 1) + " · " +
+                    (PlainText.perMille(offset, documentText.length()) / 10.0) + "%";
+        store.addMark(book.id, chapter, offset, 0, label);
+        remember();
+        Toast.makeText(this, "Bookmark saved", Toast.LENGTH_SHORT).show();
+    }
+
+    private void showMarks() {
+        List<BookStore.Mark> marks = store.marks(book.id);
+        if (marks.isEmpty()) {
+            Toast.makeText(this, "No bookmarks yet", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String[] names = new String[marks.size()];
+        for (int i = 0; i < marks.size(); i++) names[i] = marks.get(i).label;
+        new AlertDialog.Builder(this).setTitle("Bookmarks")
+                .setItems(names, (dialog, which) -> navigate(marks.get(which)))
+                .setNeutralButton("Delete bookmark…", (dialog, which) -> deleteMarkDialog())
+                .setNegativeButton("Close", null).show();
+    }
+
+    private void navigate(BookStore.Mark mark) {
+        if (book.isPaper()) {
+            store.page(book.id, mark.page);
+            showPaper();
+        } else if (!book.isText() && chapter != mark.chapter) {
+            remember();
+            chapter = mark.chapter;
+            savedOffset = mark.charOffset;
+            legacyScrollY = 0;
+            loadEpubChapter();
+        } else {
+            jumpTo(mark.charOffset);
         }
     }
 
+    private void deleteMarkDialog() {
+        List<BookStore.Mark> marks = store.marks(book.id);
+        String[] labels = new String[marks.size()];
+        for (int i = 0; i < marks.size(); i++) labels[i] = marks.get(i).label;
+        new AlertDialog.Builder(this).setTitle("Remove which bookmark?")
+                .setItems(labels, (dialog, which) -> {
+                    store.deleteMark(book.id, marks.get(which).id);
+                    Toast.makeText(this, "Bookmark removed", Toast.LENGTH_SHORT).show();
+                }).setNegativeButton("Cancel", null).show();
+    }
+
     private void error(Exception exception) {
-        String message = exception.getMessage() == null ? "Could not open EPUB" : exception.getMessage();
+        String message = exception.getMessage() == null ? "Could not read document" : exception.getMessage();
         runOnUiThread(() -> {
             if (!isDestroyed() && !isFinishing())
-                new AlertDialog.Builder(this).setTitle("EPUB error").setMessage(message)
+                new AlertDialog.Builder(this).setTitle("Reading error").setMessage(message)
                         .setPositiveButton("OK", null).show();
         });
     }
 
     @Override protected void onResume() {
         super.onResume();
-        if (book != null && !book.isPaper() && foregroundSinceElapsed == 0) {
+        if (book != null && book.isDigital() && foregroundSinceElapsed == 0) {
             foregroundSinceMs = System.currentTimeMillis();
             foregroundSinceElapsed = SystemClock.elapsedRealtime();
         }
     }
 
     @Override protected void onPause() {
-        if (book != null && !book.isPaper()) {
+        handler.removeCallbacks(deferredPositionSave);
+        if (book != null && book.isDigital()) {
             remember();
             if (foregroundSinceElapsed != 0) {
                 long elapsed = SystemClock.elapsedRealtime() - foregroundSinceElapsed;
@@ -224,7 +408,8 @@ public final class ReadActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
-        ++readRequest;
+        ++requestId;
+        handler.removeCallbacks(deferredPositionSave);
         if (store != null) store.close();
         super.onDestroy();
     }
