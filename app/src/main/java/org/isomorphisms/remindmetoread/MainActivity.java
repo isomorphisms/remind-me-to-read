@@ -24,7 +24,6 @@ import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
-import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.io.InputStream;
 import java.text.DateFormat;
@@ -232,7 +231,9 @@ public final class MainActivity extends Activity {
                 result.append("EPUB chapter: ").append(b.chapter + 1)
                         .append("\nCharacter position in chapter: ").append(b.charOffset).append("\n");
             }
-            result.append("Last read (epoch milliseconds, 0 if never): ")
+            result.append("Last read: ").append(b.lastReadAt == 0
+                    ? "never" : new Date(b.lastReadAt).toString()).append("\n");
+            result.append("Last read (epoch milliseconds): ")
                     .append(b.lastReadAt).append("\n");
             result.append("Total reading seconds: ").append(b.totalSeconds).append("\n");
             for (BookStore.Mark mark : store.marks(b.id)) {

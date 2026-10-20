@@ -281,7 +281,9 @@ public final class ReadActivity extends Activity {
         Layout layout = content.getLayout();
         if (layout == null || documentText.isEmpty()) return 0;
         int maxY = Math.max(0, content.getHeight() - scroll.getHeight());
-        if (maxY > 0 && scroll.getScrollY() >= maxY - px(2)) return documentText.length();
+        // For a short document fitting on one screen, an explicit seek still marks progress.
+        if (maxY == 0) return Math.max(0, Math.min(savedOffset, documentText.length()));
+        if (scroll.getScrollY() >= maxY - px(2)) return documentText.length();
         int line = layout.getLineForVertical(Math.max(0, scroll.getScrollY()));
         return Math.min(documentText.length(), layout.getLineStart(line));
     }
@@ -328,6 +330,13 @@ public final class ReadActivity extends Activity {
     private void addDigitalMark() {
         if (!loaded) return;
         int offset = currentOffset();
+        for (BookStore.Mark mark : store.marks(book.id)) {
+            if (mark.chapter == chapter && mark.charOffset == offset) {
+                store.deleteMark(book.id, mark.id);
+                Toast.makeText(this, "Bookmark removed", Toast.LENGTH_SHORT).show();
+                return;
+            }
+        }
         String label = book.isText()
                 ? "TXT " + (PlainText.perMille(offset, documentText.length()) / 10.0) + "%"
                 : "Chapter " + (chapter + 1) + " · " +
