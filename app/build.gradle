@@ -12,6 +12,23 @@ android {
         versionName '0.2.0'
     }
 
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'armeabi-v7a', 'arm64-v8a'
+            universalApk false
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Consumer ProGuard rules from ML Kit are applied automatically.
+            minifyEnabled true
+            shrinkResources true
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
