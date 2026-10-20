@@ -38,6 +38,29 @@ Notifications require Android's runtime notification permission on Android 13+. 
 
 GPT-OSS weights are **not bundled on Android**. In particular, gpt-oss-20b does not fit the intended low-RAM phones. Host it separately and supply an HTTPS API endpoint; tracking and reminders always work without any model or network connection. Review the receiver's data handling before connecting a third-party host.
 
+
+## Folder scanning and ReadEra savepoints (0.3.0)
+
+The home screen leads with **Scan books and ReadEra savepoints**. Select a folder through Android's system picker (books, SD card subfolder, or shared-storage area), granting access once. Subsequent launches rescan approved folders approximately every 12 hours. **More → Rescan authorized folders** forces a scan. Multiple folders can be added. Per-folder limits: 20,000 files visited, 1,000 books added, 20 ReadEra backups. The scanner reports skipped/unreadable items.
+
+Scan EPUB, TXT and BAK, deduplicating EPUB/TXT by exact SHA-1 of document bytes (and URI for repeat scans). Books are copied to the app's private library. No unrestricted Android storage permission.
+
+ReadEra's private live database is isolated by Android 14; use its exported backup:
+
+1. In ReadEra choose **Settings → Backup & Restore → Create a backup**.
+2. Choose **More → Scan ReadEra backup folder** and select the backup folder (often Internal storage / ReadEra / BackUps), or **More → Import one ReadEra .bak**.
+3. Scan the folder containing corresponding EPUB/TXT documents.
+4. The application matches saved positions to actual files by SHA-1 (not by title guesses). Matched books show ReadEra last-read time and approximate percent, while unmatched records are retained in the library.
+5. In the reader, tap the **ReadEra savepoint** button to explicitly estimate where to resume.
+
+ReadEra backup files are ZIP files holding library.json. The parser extracts document hash, original serialized position, and last-read time; keeps raw location information for possible future accurate XPath-based anchoring. EPUB percentage mapping is **approximate**, because this text-only renderer has different pagination and does not yet interpret ReadEra XPath precisely. An external timestamp is not a duration, so no reading minutes are invented. Highlight/note conversion is not yet included.
+
+## Photograph one physical book or a stack
+
+Tap **Photograph a book or a stack**. Take a full-sized picture with the phone camera or select a gallery image. Bundled Latin-script Google ML Kit OCR runs entirely on the device and tries four rotations to find vertical spine titles. It proposes separate candidate titles; edit the multiline list to remove mistaken publisher names and fragments before confirming. One image can add multiple books. Nothing is sent to a remote OCR or GPT server.
+
+Photo-added books start with an unknown page count: open one and choose **Edit title, author and page count** to fill in the metadata. Manual physical-book entry remains under **More**. Bundled OCR increases APK size substantially; physical C67 OCR accuracy, real backup format variations and external acceptance are still pending.
+
 ## Next qualification
 
 - Physical-device tests on MIRO C67: import, resume, notifications, battery mode, screen lock, process death.

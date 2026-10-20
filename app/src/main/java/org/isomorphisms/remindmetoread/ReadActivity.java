@@ -86,8 +86,9 @@ public final class ReadActivity extends Activity {
         outer.addView(root);
         setContentView(outer);
         root.addView(text(book.title, 24));
+        root.addView(button("Edit title, author and page count", this::editPhysicalBook));
         root.addView(text("Physical book · " + book.totalSeconds / 60 + " minutes recorded", 15));
-        root.addView(text("Current page: " + book.currentPage + " of " + book.totalPages, 16));
+        root.addView(text("Current page: " + book.currentPage + (book.totalPages == 0 ? " (total pages not set)" : " of " + book.totalPages), 16));
 
         EditText page = new EditText(this);
         page.setSingleLine(true);
@@ -127,6 +128,45 @@ public final class ReadActivity extends Activity {
         root.addView(button("Back to library", this::finish));
     }
 
+    private void editPhysicalBook() {
+        BookStore.Book current = store.get(book.id);
+        if (current == null) return;
+        LinearLayout form = column();
+        EditText title = new EditText(this);
+        title.setSingleLine(true);
+        title.setHint("Book title");
+        title.setText(current.title);
+        EditText author = new EditText(this);
+        author.setSingleLine(true);
+        author.setHint("Author (optional)");
+        author.setText(current.author);
+        EditText total = new EditText(this);
+        total.setInputType(InputType.TYPE_CLASS_NUMBER);
+        total.setSingleLine(true);
+        total.setHint("Total pages (0 if unknown)");
+        total.setText(Integer.toString(current.totalPages));
+        form.addView(title);
+        form.addView(author);
+        form.addView(total);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Physical book details")
+                .setView(form).setNegativeButton("Cancel", null)
+                .setPositiveButton("Save", null).create();
+        dialog.setOnShowListener(v -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(w -> {
+                    String name = title.getText().toString().trim();
+                    if (name.isEmpty()) { title.setError("Title required"); return; }
+                    int pages;
+                    try { pages = Integer.parseInt(total.getText().toString().trim()); }
+                    catch (NumberFormatException ex) { total.setError("Enter a page count"); return; }
+                    if (pages < 0) { total.setError("Pages cannot be negative"); return; }
+                    store.changePaper(current.id, name, author.getText().toString(), pages);
+                    dialog.dismiss();
+                    showPaper();
+                }));
+        dialog.show();
+    }
+
     private void savePaperPage(EditText page) {
         try {
             int current = Integer.parseInt(page.getText().toString().trim());
@@ -150,6 +190,19 @@ public final class ReadActivity extends Activity {
 
         location = text("Loading…", 13);
         root.addView(location);
+        BookStore.ReadEraPoint readera = store.readeraFor(book);
+        if (readera != null && readera.ratio > 0) {
+            root.addView(button("ReadEra savepoint: ~" +
+                    Math.round(readera.ratio * 1000) / 10.0 + "% · resume", () -> {
+                new AlertDialog.Builder(this).setTitle("Use ReadEra savepoint?")
+                    .setMessage("ReadEra's position is imported from its backup. " +
+                            "This reader estimates the text location from its percentage; " +
+                            "it may differ from ReadEra's exact page. " +
+                            "Your current position will be replaced only if you confirm.")
+                    .setPositiveButton("Estimate location", (d, w) -> useReadEraPosition(readera))
+                    .setNegativeButton("Cancel", null).show();
+            }));
+        }
 
         if (!book.isText()) {
             LinearLayout controls = new LinearLayout(this);
@@ -250,6 +303,54 @@ public final class ReadActivity extends Activity {
                 });
             } catch (Exception ex) { error(ex); }
         }, "epub-chapter").start();
+    }
+
+    private void useReadEraPosition(BookStore.ReadEraPoint position) {
+        if (!Double.isFinite(position.ratio) || position.ratio < 0 || position.ratio > 1) return;
+        if (book.isText()) {
+            if (loaded) jumpTo((int) Math.round(position.ratio * documentText.length()));
+            return;
+        }
+        if (chapters.isEmpty()) {
+            Toast.makeText(this, "EPUB still loading", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        // EPUB's CSS and renderer-dependent page numbers differ from our text-only reader.
+        // Approximate the location by fraction of decoded text, never claim exact restoration.
+        List<String> paths = new ArrayList<>(chapters);
+        location.setText("Estimating ReadEra EPUB location…");
+        new Thread(() -> {
+            try {
+                long[] lengths = new long[paths.size()];
+                long total = 0;
+                File file = new File(book.epubPath);
+                for (int i = 0; i < paths.size(); i++) {
+                    lengths[i] = Epub.chapterText(file, paths.get(i)).length();
+                    total += lengths[i];
+                }
+                if (total <= 0) throw new java.io.IOException("EPUB has no text to position");
+                long positionInAllText = Math.max(0, Math.min(total, Math.round(position.ratio * total)));
+                long prefix = 0;
+                int index = paths.size() - 1;
+                for (int i = 0; i < paths.size(); i++) {
+                    if (positionInAllText < prefix + lengths[i]) { index = i; break; }
+                    prefix += lengths[i];
+                }
+                int targetChapter = index;
+                int offset = (int) Math.max(0, Math.min(lengths[index], positionInAllText - prefix));
+                runOnUiThread(() -> {
+                    if (isDestroyed() || isFinishing()) return;
+                    // Snapshot current EPUB position before switching chapters.
+                    remember();
+                    chapter = targetChapter;
+                    savedOffset = offset;
+                    legacyScrollY = 0;
+                    loadEpubChapter();
+                });
+            } catch (Exception exception) {
+                error(exception);
+            }
+        }, "readera-epub-position").start();
     }
 
     private void display(String words, int request) {

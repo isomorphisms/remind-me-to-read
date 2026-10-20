@@ -16,7 +16,7 @@ public final class BookStore extends SQLiteOpenHelper {
 
     public static final class Book {
         public long id, addedAt, lastReadAt, totalSeconds, readingSince;
-        public String title, author, epubPath;
+        public String title, author, epubPath, sourceUri, sourceSha1;
         public int kind, chapter, scrollY, charOffset, contentLength, currentPage, totalPages;
         public boolean isPaper() { return kind == PAPER; }
         public boolean isText() { return kind == TEXT; }
@@ -29,15 +29,21 @@ public final class BookStore extends SQLiteOpenHelper {
         public String label;
     }
 
+    public static final class ReadEraPoint {
+        public String sha1, title, filename, rawPosition;
+        public double ratio;
+        public long lastReadMs, importedAt;
+    }
+
     public BookStore(Context context) {
-        super(context, "reading.sqlite", null, 2);
+        super(context, "reading.sqlite", null, 3);
     }
 
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE books (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 "title TEXT NOT NULL, author TEXT NOT NULL, kind INTEGER NOT NULL," +
-                "epub_path TEXT, chapter INTEGER NOT NULL DEFAULT 0," +
+                "epub_path TEXT, source_uri TEXT, source_sha1 TEXT, chapter INTEGER NOT NULL DEFAULT 0," +
                 "scroll_y INTEGER NOT NULL DEFAULT 0, char_offset INTEGER NOT NULL DEFAULT 0," +
                 "content_length INTEGER NOT NULL DEFAULT 0," +
                 "current_page INTEGER NOT NULL DEFAULT 0, total_pages INTEGER NOT NULL DEFAULT 0," +
@@ -45,6 +51,16 @@ public final class BookStore extends SQLiteOpenHelper {
                 "total_seconds INTEGER NOT NULL DEFAULT 0, reading_since_ms INTEGER NOT NULL DEFAULT 0)");
         createSessions(db);
         createMarks(db);
+        createReadEra(db);
+    }
+
+    private static void createReadEra(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE readera_positions (" +
+                "sha1 TEXT PRIMARY KEY, title TEXT NOT NULL, filename TEXT NOT NULL," +
+                "ratio REAL NOT NULL, last_read_ms INTEGER NOT NULL," +
+                "raw_position TEXT NOT NULL, imported_ms INTEGER NOT NULL)");
+        db.execSQL("CREATE INDEX book_sha1 ON books(source_sha1)");
+        db.execSQL("CREATE INDEX book_source ON books(source_uri)");
     }
 
     private static void createSessions(SQLiteDatabase db) {
@@ -69,13 +85,16 @@ public final class BookStore extends SQLiteOpenHelper {
     }
 
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        if (oldVersion == 1 && newVersion >= 2) {
-            // Preserve existing books, reading sessions, time totals and EPUB scroll positions.
+        if (oldVersion < 1 || newVersion != 3) throw new IllegalStateException("Unsupported database version");
+        if (oldVersion == 1) {
             db.execSQL("ALTER TABLE books ADD COLUMN char_offset INTEGER NOT NULL DEFAULT 0");
             db.execSQL("ALTER TABLE books ADD COLUMN content_length INTEGER NOT NULL DEFAULT 0");
             createMarks(db);
-        } else {
-            throw new IllegalStateException("Unsupported reading database upgrade: " + oldVersion);
+        }
+        if (oldVersion <= 2) {
+            db.execSQL("ALTER TABLE books ADD COLUMN source_uri TEXT");
+            db.execSQL("ALTER TABLE books ADD COLUMN source_sha1 TEXT");
+            createReadEra(db);
         }
     }
 
@@ -130,6 +149,8 @@ public final class BookStore extends SQLiteOpenHelper {
         b.author = word(c, "author");
         b.kind = (int) number(c, "kind");
         b.epubPath = word(c, "epub_path");
+        b.sourceUri = word(c, "source_uri");
+        b.sourceSha1 = word(c, "source_sha1");
         b.chapter = (int) number(c, "chapter");
         b.scrollY = (int) number(c, "scroll_y");
         b.charOffset = (int) number(c, "char_offset");
@@ -149,6 +170,102 @@ public final class BookStore extends SQLiteOpenHelper {
     private static String word(Cursor c, String col) {
         String value = c.getString(c.getColumnIndexOrThrow(col));
         return value == null ? "" : value;
+    }
+
+
+    public synchronized Book bySourceUri(String uri) {
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT * FROM books WHERE source_uri=? LIMIT 1", new String[]{uri})) {
+            return c.moveToFirst() ? from(c) : null;
+        }
+    }
+
+    public synchronized Book bySha1(String sha1) {
+        if (sha1 == null || sha1.isEmpty()) return null;
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT * FROM books WHERE source_sha1=? LIMIT 1", new String[]{sha1})) {
+            return c.moveToFirst() ? from(c) : null;
+        }
+    }
+
+    public synchronized void source(long bookId, String uri, String sha1) {
+        ContentValues values = new ContentValues();
+        if (uri != null && !uri.isEmpty()) values.put("source_uri", uri);
+        if (sha1 != null && !sha1.isEmpty()) values.put("source_sha1", sha1.toLowerCase(java.util.Locale.ROOT));
+        getWritableDatabase().update("books", values, "id=?", new String[]{Long.toString(bookId)});
+    }
+
+    public synchronized void changePaper(long bookId, String title, String author, int totalPages) {
+        Book book = get(bookId);
+        if (book == null || !book.isPaper() || title.trim().isEmpty()) return;
+        ContentValues values = new ContentValues();
+        values.put("title", title.trim());
+        values.put("author", author.trim());
+        values.put("total_pages", Math.max(0, totalPages));
+        if (totalPages > 0 && book.currentPage > totalPages) values.put("current_page", totalPages);
+        getWritableDatabase().update("books", values, "id=?", new String[]{Long.toString(bookId)});
+    }
+
+    public synchronized boolean hasPaperTitle(String title) {
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT 1 FROM books WHERE kind=1 AND lower(trim(title))=lower(trim(?)) LIMIT 1",
+                new String[]{title})) {
+            return c.moveToFirst();
+        }
+    }
+
+    /** Backups are external observations. They never increment our measured session time. */
+    public synchronized void readeraRecord(ReadEraImporter.Record r) {
+        if (r == null || r.sha1 == null || !r.sha1.matches("(?i)[0-9a-f]{40}")) return;
+        if (!Double.isFinite(r.ratio) || r.ratio < 0 || r.ratio > 1) return;
+        ReadEraPoint previous = readeraByHash(r.sha1);
+        if (previous != null && previous.lastReadMs > r.lastReadMs) return;
+        ContentValues values = new ContentValues();
+        values.put("sha1", r.sha1.toLowerCase(java.util.Locale.ROOT));
+        values.put("title", r.title == null ? "" : r.title);
+        values.put("filename", r.filename == null ? "" : r.filename);
+        values.put("ratio", r.ratio);
+        values.put("last_read_ms", Math.max(0, r.lastReadMs));
+        values.put("raw_position", r.rawPosition == null ? "" : r.rawPosition);
+        values.put("imported_ms", System.currentTimeMillis());
+        getWritableDatabase().insertWithOnConflict("readera_positions", null, values,
+                SQLiteDatabase.CONFLICT_REPLACE);
+    }
+
+    private static ReadEraPoint readeraFrom(Cursor c) {
+        ReadEraPoint item = new ReadEraPoint();
+        item.sha1 = word(c, "sha1");
+        item.title = word(c, "title");
+        item.filename = word(c, "filename");
+        item.ratio = c.getDouble(c.getColumnIndexOrThrow("ratio"));
+        item.lastReadMs = number(c, "last_read_ms");
+        item.rawPosition = word(c, "raw_position");
+        item.importedAt = number(c, "imported_ms");
+        return item;
+    }
+
+    public synchronized ReadEraPoint readeraByHash(String sha1) {
+        if (sha1 == null || sha1.isEmpty()) return null;
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT * FROM readera_positions WHERE sha1=?",
+                new String[]{sha1.toLowerCase(java.util.Locale.ROOT)})) {
+            return c.moveToFirst() ? readeraFrom(c) : null;
+        }
+    }
+
+    public synchronized ReadEraPoint readeraFor(Book book) {
+        return book == null ? null : readeraByHash(book.sourceSha1);
+    }
+
+    public synchronized List<ReadEraPoint> unmatchedReadEra() {
+        List<ReadEraPoint> records = new ArrayList<>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT r.* FROM readera_positions r WHERE NOT EXISTS (" +
+                "SELECT 1 FROM books b WHERE b.source_sha1=r.sha1) " +
+                "ORDER BY r.last_read_ms DESC LIMIT 100", null)) {
+            while (c.moveToNext()) records.add(readeraFrom(c));
+        }
+        return records;
     }
 
     /** Stable position is a UTF-16 character offset, independent of rendered font/viewport. */

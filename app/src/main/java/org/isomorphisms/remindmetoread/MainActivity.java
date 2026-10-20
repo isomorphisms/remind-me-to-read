@@ -29,11 +29,19 @@ import java.io.InputStream;
 import java.text.DateFormat;
 import java.util.List;
 import java.util.UUID;
+import java.util.HashSet;
+import java.util.Set;
+import android.content.SharedPreferences;
 
 /** Native Android shell. No account, analytics, or access to other apps' reading data. */
 public final class MainActivity extends Activity {
     private static final int OPEN_EPUB = 101;
     private static final int EXPORT_MARKERS = 102;
+    private static final int PICK_BOOK_FOLDER = 103;
+    private static final int PICK_BACKUP_FOLDER = 104;
+    private static final int PICK_READBAK = 105;
+    private boolean scanRunning;
+    private String scanMessage = "";
     private BookStore store;
 
     @Override public void onCreate(Bundle state) {
@@ -41,6 +49,8 @@ public final class MainActivity extends Activity {
         store = new BookStore(this);
         Reminder.channel(this);
         showHome();
+        long last = getPreferences(MODE_PRIVATE).getLong("scan_last_ms", 0);
+        if (System.currentTimeMillis() - last > 12L * 60 * 60 * 1000) scanSavedFolders(false);
     }
 
     @Override protected void onResume() {
@@ -77,21 +87,19 @@ public final class MainActivity extends Activity {
         setContentView(scroll);
 
         root.addView(label("Remind Me to Read", 27));
-        root.addView(label("Local reading history — EPUB and paper", 14));
-        root.addView(button("Import an EPUB or TXT file", this::chooseEpub));
-        root.addView(button("Add a physical book", this::addPaperDialog));
-        root.addView(button("Export reading progress as TXT", this::exportMarkers));
-        boolean enabled = Reminder.enabled(this);
-        root.addView(button(enabled ? "Daily reminder: on (change or disable)" :
-                "Enable a daily reading reminder", this::reminderDialog));
-        root.addView(button("Ask GPT-OSS (optional)", this::gptDialog));
+        root.addView(label("Local library · EPUB, TXT and physical books", 14));
+        root.addView(button("Scan books and ReadEra savepoints", () -> pickFolder(false)));
+        root.addView(button("Photograph a book or a stack", () ->
+                startActivity(new Intent(this, PhotoBooksActivity.class))));
+        root.addView(button("More: folders, backups, manual entry, settings", this::otherActions));
+        if (!scanMessage.isEmpty()) root.addView(label(scanMessage, 14));
         root.addView(label("Your books", 22));
 
         List<BookStore.Book> books = store.all();
-        if (books.isEmpty()) root.addView(label("Import an EPUB or add a paper book to begin.", 15));
+        if (books.isEmpty()) root.addView(label("Scan a books folder, photograph book spines, or import a ReadEra backup.", 15));
         for (BookStore.Book book : books) {
             String subtitle = book.isPaper()
-                    ? "Paper · page " + book.currentPage + " / " + book.totalPages
+                    ? "Paper · page " + book.currentPage + (book.totalPages == 0 ? " (total unknown)" : " / " + book.totalPages)
                     : book.isText()
                     ? "TXT · " + (PlainText.perMille(book.charOffset, book.contentLength) / 10.0) + "% read"
                     : "EPUB · chapter " + (book.chapter + 1);
@@ -102,8 +110,16 @@ public final class MainActivity extends Activity {
             root.addView(label(book.title, 19));
             if (!book.author.isEmpty()) root.addView(label(book.author, 13));
             root.addView(label(subtitle + " · " + duration + " read", 14));
-            root.addView(label("Last read: " + last +
+            root.addView(label("Last read here: " + last +
                     (book.readingSince > 0 ? " · session running" : ""), 13));
+            BookStore.ReadEraPoint external = store.readeraFor(book);
+            if (external != null) {
+                String when = external.lastReadMs == 0 ? "unknown date"
+                    : DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
+                            .format(external.lastReadMs);
+                root.addView(label("ReadEra savepoint: ~" + Math.round(external.ratio * 1000) / 10.0 +
+                        "% · last ReadEra activity " + when, 13));
+            }
             root.addView(button(book.readingSince > 0 ? "Resume session" : "Read / log time",
                     () -> open(book.id)));
             View line = new View(this);
@@ -112,6 +128,21 @@ public final class MainActivity extends Activity {
             p.setMargins(0, px(10), 0, px(12));
             root.addView(line, p);
         }
+        showUnmatchedReadEra(root);
+    }
+
+    private void showUnmatchedReadEra(LinearLayout root) {
+        List<BookStore.ReadEraPoint> points = store.unmatchedReadEra();
+        if (points.isEmpty()) return;
+        root.addView(label("ReadEra savepoints — book file not found yet", 19));
+        root.addView(label("Scan the folder containing those books. Saved positions match by SHA-1, not guessed titles.", 13));
+        int shown = Math.min(20, points.size());
+        for (int i = 0; i < shown; i++) {
+            BookStore.ReadEraPoint point = points.get(i);
+            root.addView(label(point.title + " · ~" +
+                    Math.round(point.ratio * 1000) / 10.0 + "%", 14));
+        }
+        if (points.size() > shown) root.addView(label("And more saved ReadEra books…", 13));
     }
 
     private static String duration(long seconds) {
@@ -123,6 +154,129 @@ public final class MainActivity extends Activity {
         Intent i = new Intent(this, ReadActivity.class);
         i.putExtra("book_id", id);
         startActivity(i);
+    }
+
+    private void otherActions() {
+        String[] options = {
+                "Scan another book folder",
+                "Scan ReadEra backup folder",
+                "Import one ReadEra .bak",
+                "Rescan authorized folders",
+                "Import one EPUB or TXT",
+                "Enter physical book manually",
+                "Export progress to TXT",
+                Reminder.enabled(this) ? "Change/disable daily reminder" : "Enable daily reminder",
+                "Ask GPT-OSS (optional)"
+        };
+        new AlertDialog.Builder(this).setTitle("Reading library")
+                .setItems(options, (dialog, selected) -> {
+                    switch (selected) {
+                        case 0: pickFolder(false); break;
+                        case 1: pickFolder(true); break;
+                        case 2: pickReadEraBackup(); break;
+                        case 3: scanSavedFolders(true); break;
+                        case 4: chooseEpub(); break;
+                        case 5: addPaperDialog(); break;
+                        case 6: exportMarkers(); break;
+                        case 7: reminderDialog(); break;
+                        case 8: gptDialog(); break;
+                    }
+                }).setNegativeButton("Close", null).show();
+    }
+
+    private void pickFolder(boolean backupsOnly) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(intent, backupsOnly ? PICK_BACKUP_FOLDER : PICK_BOOK_FOLDER);
+    }
+
+    private void pickReadEraBackup() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivityForResult(intent, PICK_READBAK);
+    }
+
+    private void acceptFolder(Uri uri, boolean backupsOnly) {
+        try {
+            getContentResolver().takePersistableUriPermission(uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            SharedPreferences preferences = getPreferences(MODE_PRIVATE);
+            Set<String> stored = new HashSet<>(preferences.getStringSet(
+                    backupsOnly ? "backups_trees" : "book_trees",
+                    java.util.Collections.emptySet()));
+            stored.add(uri.toString());
+            preferences.edit().putStringSet(backupsOnly ? "backups_trees" : "book_trees",
+                    stored).apply();
+            scanSavedFolders(true);
+        } catch (SecurityException ex) {
+            new AlertDialog.Builder(this).setTitle("Folder permission unavailable")
+                    .setMessage(ex.getMessage()).setPositiveButton("OK", null).show();
+        }
+    }
+
+    private void scanSavedFolders(boolean explicit) {
+        if (scanRunning) return;
+        SharedPreferences p = getPreferences(MODE_PRIVATE);
+        Set<String> books = new HashSet<>(p.getStringSet("book_trees",
+                java.util.Collections.emptySet()));
+        Set<String> backups = new HashSet<>(p.getStringSet("backups_trees",
+                java.util.Collections.emptySet()));
+        if (books.isEmpty() && backups.isEmpty()) {
+            if (explicit) new AlertDialog.Builder(this).setMessage(
+                    "Choose a books folder or a ReadEra backup folder first.")
+                    .setPositiveButton("OK", null).show();
+            return;
+        }
+        scanRunning = true;
+        scanMessage = "Scanning authorized folders…";
+        showHome();
+        new Thread(() -> {
+            LibraryScanner.Summary total = new LibraryScanner.Summary();
+            try (BookStore db = new BookStore(this)) {
+                LibraryScanner.indexExisting(db);
+                for (String uri : books) accumulate(total, LibraryScanner.scan(this, Uri.parse(uri), db, false));
+                for (String uri : backups) {
+                    if (!books.contains(uri))
+                        accumulate(total, LibraryScanner.scan(this, Uri.parse(uri), db, true));
+                }
+                scanMessage = total.report();
+            } catch (Exception ex) {
+                scanMessage = "Scan stopped: " + ex.getMessage() + " · " + total.report();
+            }
+            getPreferences(MODE_PRIVATE).edit().putLong("scan_last_ms",
+                    System.currentTimeMillis()).apply();
+            runOnUiThread(() -> {
+                scanRunning = false;
+                if (!isFinishing() && !isDestroyed()) showHome();
+            });
+        }, "books-folder-scan").start();
+    }
+
+    private static void accumulate(LibraryScanner.Summary a, LibraryScanner.Summary b) {
+        a.visited += b.visited;
+        a.booksAdded += b.booksAdded;
+        a.alreadyPresent += b.alreadyPresent;
+        a.backupsRead += b.backupsRead;
+        a.readeraPoints += b.readeraPoints;
+        a.errors += b.errors;
+    }
+
+    private void importReadEraBackup(Uri uri) {
+        scanMessage = "Scanning ReadEra backup…";
+        showHome();
+        new Thread(() -> {
+            try (BookStore db = new BookStore(this)) {
+                LibraryScanner.indexExisting(db);
+                int n = LibraryScanner.importBackup(this, uri, db);
+                scanMessage = n + " ReadEra savepoints found. Only exact file-hash matches are attached to books.";
+            } catch (Exception e) {
+                scanMessage = "ReadEra import failed: " + e.getMessage();
+            }
+            runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) showHome(); });
+        }, "readera-backup-import").start();
     }
 
     private void chooseEpub() {
@@ -140,6 +294,20 @@ public final class MainActivity extends Activity {
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         if (request == EXPORT_MARKERS) {
             exportTo(data.getData());
+            return;
+        }
+        if (request == PICK_BOOK_FOLDER || request == PICK_BACKUP_FOLDER) {
+            acceptFolder(data.getData(), request == PICK_BACKUP_FOLDER);
+            return;
+        }
+        if (request == PICK_READBAK) {
+            String picked = displayName(data.getData()).toLowerCase(Locale.ROOT);
+            if (!picked.endsWith(".bak")) {
+                new AlertDialog.Builder(this).setMessage("Choose a ReadEra .bak backup.")
+                        .setPositiveButton("OK", null).show();
+                return;
+            }
+            importReadEraBackup(data.getData());
             return;
         }
         if (request != OPEN_EPUB) return;
@@ -184,6 +352,8 @@ public final class MainActivity extends Activity {
                     Epub.Info info = Epub.inspect(target);
                     bookId = store.addEpub(info.title, info.author, target.getAbsolutePath());
                 }
+                String sha = LibraryScanner.hash(target);
+                store.source(bookId, uri.toString(), sha);
                 runOnUiThread(() -> { if (!isFinishing() && !isDestroyed()) { showHome(); open(bookId); } });
             } catch (Exception ex) {
                 if (target != null) target.delete();
