@@ -99,7 +99,7 @@ def legacy_database(connection):
     return database
 
 
-def append_bytes(archive, target, name, length_limit, source):
+def append_bytes(archive, name, length_limit, source):
     digest = hashlib.sha256()
     first_sha1 = hashlib.sha1()
     count = 0
@@ -180,7 +180,7 @@ def convert(source_path, output_path):
                     target_name = "books/" + str(ident) + suffix
                     with source.extractfile(members[member]) as oldfile:
                         recorded, sha1 = append_bytes(
-                            target, source, target_name, MAX_BOOK, oldfile)
+                            target, target_name, MAX_BOOK, oldfile)
                     if book["source_sha1"] not in (None, "") and (
                         book["source_sha1"].lower() != sha1
                     ):
@@ -220,14 +220,15 @@ def convert(source_path, output_path):
         # Portable verifier is separately owned by AI-CI. Do not claim that
         # a self-produced manifest authenticates the original device.
         os.replace(temp_output, output)
+        with output.open("rb") as final_file:
+            final_sha = hashlib.file_digest(final_file, "sha256").hexdigest()
         return {
             "books": len(database["books"]),
             "private_file_count": len(used),
             "bookmarks": len(database["bookmarks"]),
             "sessions": len(database["sessions"]),
             "readera_positions": len(database["readera_positions"]),
-            "output_sha256": hashlib.file_digest(
-                output.open("rb"), "sha256").hexdigest()
+            "output_sha256": final_sha
         }
     finally:
         if temp_output.exists():
