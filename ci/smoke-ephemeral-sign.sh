@@ -20,7 +20,7 @@ export RMR_DEV_CERT_SHA256="$(
     keytool -list -v -alias "$RMR_DEV_KEY_ALIAS" -storetype PKCS12 \
         -keystore "$RMR_DEV_KEYSTORE_FILE" \
         -storepass "$RMR_DEV_KEYSTORE_PASSWORD" |
-    sed -n 's/^ *SHA256: *//p' | head -n1 |
+    sed -n 's/^[[:space:]]*SHA256:[[:space:]]*//p' | head -n1 |
     tr -d ':\r' | tr '[:upper:]' '[:lower:]'
 )"
 [[ "$RMR_DEV_CERT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
