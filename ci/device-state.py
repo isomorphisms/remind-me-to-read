@@ -15,7 +15,7 @@ import tempfile
 TABLES = ("books", "bookmarks", "sessions", "readera_positions")
 
 
-def examine(tar_path):
+def examine(tar_path, legacy=False):
     with tempfile.TemporaryDirectory(prefix="rmr-logical-state-") as directory:
         root = pathlib.Path(directory)
         file_hashes = {}
@@ -50,10 +50,17 @@ def examine(tar_path):
         connection = sqlite3.connect(f"file:{pathlib.Path(database).as_posix()}?mode=ro", uri=True)
         try:
             rows = {}
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if legacy and version not in (1, 2, 3):
+                raise ValueError("Unknown legacy private SQLite schema")
             for table in TABLES:
                 key = "sha1" if table == "readera_positions" else "id"
                 columns = [r[1] for r in connection.execute(f"PRAGMA table_info({table})")]
                 if not columns:
+                    if legacy and ((table == "readera_positions" and version < 3)
+                                   or (table == "bookmarks" and version == 1)):
+                        rows[table] = []
+                        continue
                     raise ValueError(f"Missing database table {table}")
                 rows[table] = [dict(zip(columns, row)) for row in
                                connection.execute(f"SELECT * FROM {table} ORDER BY {key}")]
@@ -94,7 +101,7 @@ def digest(state):
 
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--verify-legacy":
-        state = examine(sys.argv[2])
+        state = examine(sys.argv[2], legacy=True)
         print(f"verified_legacy_archive_state_sha256={digest(state)}")
         print(f"books={len(state['tables']['books'])} private_files={len(state['book_sha256'])}")
         return
