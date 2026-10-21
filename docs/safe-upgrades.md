@@ -143,6 +143,42 @@ runs, and keeping offline copies are **human/secure-environment actions**
 and are not completed by adding this configuration. Never put a base64 key
 in a PR, issue, chat, artifact or log.
 
+## Two independent signed builds before APK publication
+
+The protected job first produces an artifact named
+`remind-me-to-read-stable-dev-candidate`. **Candidate does not mean
+installable or release-ready.** Initial signing runs cannot produce qualified
+APKs without an earlier independently verified candidate.
+
+After one protected candidate run has completed its finished-APK certificate
+checks, the custodian pins its GitHub Actions **artifact ID** in the protected
+environment variable `RMR_PREVIOUS_SIGNED_ARTIFACT_ID` and launches a
+second authorized protected-branch build. This ID is public metadata, not a
+keystore or password. The prior artifact is retrieved with read-only Actions
+permissions and must originate from this repository's approved signing workflow.
+
+The comparison checks actual APK bytes, certificates for both ABIs, recorded
+source commit, prior/current GitHub run IDs and expected certificate digest.
+It rejects reusing the same run, foreign or expired candidates, a wrong SHA,
+missing APK, or a changed key. Only this check can publish the distinct
+`remind-me-to-read-verified-stable-dev-apks` artifact.
+
+To repeat the continuity check locally with both already independently
+verified signed APK directories and receipts:
+
+```sh
+python3 ci/check-continuity.py first/signing-receipt.txt second/signing-receipt.txt CERT_SHA256 \
+  --previous-dir first/apks --current-dir second/apks \
+  --previous-run FIRST_RUN_ID --current-run SECOND_RUN_ID \
+  --previous-source FIRST_GIT_SHA --current-source SECOND_GIT_SHA
+```
+
+This establishes cryptographic identity across **two builds**, not that the
+existing different-key installations can upgrade. The independent AI-CI
+signing registry must register the protected public fingerprint before even
+a candidate APK is accepted. Secure provisioning, two-build certificate
+checks and physical A1/C67 data-preserving installations are separate gates.
+
 ## Physical same-key upgrade acceptance
 
 After the protected signer is actually provisioned, seed each physical phone
