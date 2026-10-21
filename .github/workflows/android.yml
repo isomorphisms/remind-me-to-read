@@ -5,6 +5,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 
 jobs:
   tests:
@@ -45,6 +46,8 @@ jobs:
       RMR_DEV_KEY_PASSWORD: ${{ secrets.RMR_DEV_KEY_PASSWORD }}
       RMR_DEV_CERT_SHA256: ${{ secrets.RMR_DEV_CERT_SHA256 }}
       RMR_DEV_KEYSTORE_FILE: /tmp/rmr-stable.p12
+      RMR_PREVIOUS_SIGNED_ARTIFACT_ID: ${{ vars.RMR_PREVIOUS_SIGNED_ARTIFACT_ID }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
@@ -92,9 +95,22 @@ jobs:
         with:
           apk: app/build/outputs/apk/stableDev/app-armeabi-v7a-stableDev.apk
           lane: test
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Retain signed candidate (NOT a release-ready artifact)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: remind-me-to-read-stable-dev-apks
+          name: remind-me-to-read-stable-dev-candidate
+          path: |
+            app/build/outputs/apk/stableDev/*-stableDev.apk
+            signing-receipt.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Compare actual signed APKs against a separate earlier protected build
+        shell: bash
+        run: bash ci/verify-prior-artifact.sh app/build/outputs/apk/stableDev signing-receipt.txt
+      - name: Publish TWO-BUILD-VERIFIED stableDev APK pair
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remind-me-to-read-verified-stable-dev-apks
           path: |
             app/build/outputs/apk/stableDev/*-stableDev.apk
             signing-receipt.txt
