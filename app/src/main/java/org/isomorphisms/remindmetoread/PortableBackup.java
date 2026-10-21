@@ -386,6 +386,16 @@ public final class PortableBackup {
         return result;
     }
 
+    private static String fileSha(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[16384];
+            int n;
+            while ((n = input.read(buffer)) != -1) digest.update(buffer, 0, n);
+        }
+        return sha256(digest.digest());
+    }
+
     private static void copyFile(File from, File to) throws IOException {
         try (InputStream in = new FileInputStream(from);
              OutputStream out = new FileOutputStream(to)) {
@@ -430,8 +440,13 @@ public final class PortableBackup {
                                     String logical = bookEntry(row.getLong("id"), kind);
                                     File target = new File(root, UUID.randomUUID() +
                                             (kind == BookStore.TEXT ? ".txt" : ".epub"));
-                                    copyFile(archive.stagedBooks.get(logical), target);
-                                    newFiles.add(target);
+                                    if (!target.createNewFile())
+                                        throw new IOException("Cannot create unique private book");
+                                    newFiles.add(target); // track even a partially copied file for rollback
+                                    File stagedFile = archive.stagedBooks.get(logical);
+                                    copyFile(stagedFile, target);
+                                    if (!fileSha(stagedFile).equals(fileSha(target)))
+                                        throw new IOException("Private book copy failed integrity verification");
                                     fields.put("epub_path", target.getAbsolutePath());
                                 }
                                 // SAF permissions from another app installation are not portable.
