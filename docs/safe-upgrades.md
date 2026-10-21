@@ -83,16 +83,31 @@ If `run-as` fails (for example, if the installed APK was not debuggable),
 **stop**. Do not assume the TXT report, an Android cloud backup
 (`allowBackup=false`) or changing the certificate can recover private data.
 
-Once the old archive is **verified in two separate external copies**, a
-migration to a differently signed development APK is possible by an explicitly
-approved manual uninstall/reinstall and restoring the original
-`databases/` and `files/` on the newly installed debuggable app through
-`adb shell -T run-as org.isomorphisms.remindmetoread tar -xf -`.
-This operation is intentionally **not automated**: it is destructive if
-mistakenly run against a populated library, and the file/SQLite schema must
-remain compatible. Keep the original archives permanently until the migrated
-reader has been opened and checked on the physical device. Reauthorize scanned
-folder access afterward.
+Once the old TAR has been verified and saved in **two independent external
+copies**, convert a working copy to the new portable format:
+
+```sh
+python3 ci/legacy-to-portable.py ./c67-reading-rescue.tar ./c67-complete.zip
+python3 ci/legacy-to-portable.py ./a1-reading-rescue.tar ./a1-complete.zip
+```
+
+This converter reads SQLite schema versions 1–3 explicitly, carries all
+recognized book/mark/session/ReadEra rows, requires every referenced imported
+EPUB/TXT file, rejects unexpected orphan book files, and does not overwrite an
+existing ZIP or touch the phone. The existing TAR remains untouched. **Before
+any uninstall**, independently verify each completed ZIP using the
+[AI-CI independent verifier](https://github.com/isomorphisms/ai-ci/pull/310)
+and save two external copies of both TAR and ZIP. A converter self-report alone
+is insufficient. If the old SQLite schema or files cannot be fully migrated,
+**stop and preserve the installed application**.
+
+Only after the portable backup has been independently verified and retained
+should a device owner consider migrating to a differently signed app. Use the
+new reader's **Restore complete ZIP (empty library only)** action, not an
+unchecked database-directory overwrite. The installation transition remains
+a deliberate separately authorized device operation, **not** part of this
+conversion script. Verify every recovered book, mark and session before
+discarding any old backups. Reauthorize scanned folder access afterward.
 
 If the previous keystore **is** recoverable, prefer an old-key-signed bridge
 APK with the new complete ZIP export and make an ordinary same-cert update,
