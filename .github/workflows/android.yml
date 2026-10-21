@@ -28,6 +28,8 @@ jobs:
           "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
       - name: Test all plain JVM logic and compile debug variant
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+      - name: Host-only signer continuity adversarial controls
+        run: python3 -m unittest discover -s ci -p 'test_*.py' -v
       # No ephemeral debug-key artifact is published. A green test is not an upgrade proof.
 
   sign:
