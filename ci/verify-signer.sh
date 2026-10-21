@@ -38,8 +38,9 @@ for apk in "${apks[@]}"; do
     number_of_signers="$(printf '%s\n' "$verifier_output" | grep -c '^Signer #[0-9]* certificate SHA-256 digest:' || true)"
     [[ "$number_of_signers" -eq 1 ]] || { echo "Unexpected signer count" >&2; exit 1; }
     sha="$(sha256sum "$apk" | awk '{print $1}')"
-    printf 'source_sha=%s\tabi=%s\tfile=%s\tapk_sha256=%s\tcert_sha256=%s\n' \
-      "${GITHUB_SHA:-local}" "$abi" "$(basename "$apk")" "$sha" "$digest" >> "$receipt"
+    printf 'source_sha=%s\trun_id=%s\trun_attempt=%s\tabi=%s\tfile=%s\tapk_sha256=%s\tcert_sha256=%s\n' \
+      "${GITHUB_SHA:-local}" "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-local}" \
+      "$abi" "$(basename "$apk")" "$sha" "$digest" >> "$receipt"
 done
 [[ "$found_arm64" -eq 1 && "$found_arm32" -eq 1 ]] ||
     { echo "Both C67 and A1 ABI builds required" >&2; exit 1; }
