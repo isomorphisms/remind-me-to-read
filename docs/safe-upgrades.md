@@ -96,7 +96,7 @@ recognized book/mark/session/ReadEra rows, requires every referenced imported
 EPUB/TXT file, rejects unexpected orphan book files, and does not overwrite an
 existing ZIP or touch the phone. The existing TAR remains untouched. **Before
 any uninstall**, independently verify each completed ZIP using the
-[AI-CI independent verifier](https://github.com/isomorphisms/ai-ci/pull/310)
+[AI-CI independent verifier](https://github.com/isomorphisms/ai-ci/pull/313)
 and save two external copies of both TAR and ZIP. A converter self-report alone
 is insufficient. If the old SQLite schema or files cannot be fully migrated,
 **stop and preserve the installed application**.
