@@ -8,8 +8,8 @@ android {
         applicationId 'org.isomorphisms.remindmetoread'
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName '0.2.0'
+        versionCode 3
+        versionName '0.3.1'
     }
 
     splits {
@@ -21,11 +21,36 @@ android {
         }
     }
 
+    // Protected long-lived development signer. Missing credentials cannot silently
+    // turn a stableDev build into a runner-generated debug-key APK.
+    signingConfigs {
+        stableDev {
+            storeFile file(System.getenv('RMR_DEV_KEYSTORE_FILE') ?: 'UNCONFIGURED_STABLE_DEV_SIGNER')
+            storePassword System.getenv('RMR_DEV_KEYSTORE_PASSWORD') ?: ''
+            keyAlias System.getenv('RMR_DEV_KEY_ALIAS') ?: 'UNCONFIGURED'
+            keyPassword System.getenv('RMR_DEV_KEY_PASSWORD') ?: ''
+            storeType 'pkcs12'
+        }
+    }
+
     buildTypes {
         debug {
             // Consumer ProGuard rules from ML Kit are applied automatically.
             minifyEnabled true
             shrinkResources true
+        }
+        stableDev {
+            initWith debug
+            matchingFallbacks = ['debug']
+            signingConfig signingConfigs.stableDev
+            // This is a development APK: retain run-as for controlled data rescue.
+            debuggable true
+        }
+    }
+
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
         }
     }
 
@@ -49,5 +74,6 @@ dependencies {
     // Bundled Latin OCR: offline book-spine recognition, no image upload.
     implementation 'com.google.mlkit:text-recognition:16.0.1'
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
     testImplementation 'org.json:json:20240303'
 }

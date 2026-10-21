@@ -69,3 +69,20 @@ Photo-added books start with an unknown page count: open one and choose **Edit t
 - Reference behavior and limitations: [Reader markers comparison](docs/reader-reference.md).
 - Editing/correcting sessions, backup/export and book deletion.
 - Integration adapters for other EPUB readers, only where they expose supported progress data.
+
+## Signing, complete ZIP backups and safe upgrades (repair branch)
+
+See [Safe upgrades, signed builds, legacy app rescue and C67/A1 acceptance](docs/safe-upgrades.md).
+
+The human-readable TXT progress report is not a complete data backup. New builds
+also expose a validated **complete ZIP backup** with imported EPUB/TXT bytes,
+books, positions, bookmarks, reading sessions and ReadEra records, plus
+**restore to an empty library only**. Do not uninstall a differently signed
+old APK until an independently verified complete data export exists.
+
+Android CI no longer distributes runner-signed debug APKs. Protected
+`stableDev` builds require one permanent signing keystore in secured
+environment secrets. The certificate/ABI publishing gate and physical-device
+upgrade tests are separate from ordinary JVM/Android compilation. Successful
+unit tests alone do not qualify a safe update.
+

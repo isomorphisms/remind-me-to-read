@@ -4,3 +4,12 @@ local.properties
 *.iml
 **/build/
 .DS_Store
+
+# Permanent signing keys and copied legacy-user archives must never be committed.
+.private/
+*.jks
+*.keystore
+*.p12
+*.pem
+*.tar
+*signing-receipt.txt

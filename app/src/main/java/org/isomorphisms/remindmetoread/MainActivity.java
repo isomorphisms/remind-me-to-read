@@ -40,6 +40,9 @@ public final class MainActivity extends Activity {
     private static final int PICK_BOOK_FOLDER = 103;
     private static final int PICK_BACKUP_FOLDER = 104;
     private static final int PICK_READBAK = 105;
+    private static final int EXPORT_COMPLETE = 106;
+    private static final int RESTORE_COMPLETE = 107;
+    private boolean backupRunning;
     private boolean scanRunning;
     private String scanMessage = "";
     private BookStore store;
@@ -165,6 +168,8 @@ public final class MainActivity extends Activity {
                 "Import one EPUB or TXT",
                 "Enter physical book manually",
                 "Export progress to TXT",
+                "Complete backup to ZIP (books, bookmarks, sessions)",
+                "Restore complete ZIP (empty library only)",
                 Reminder.enabled(this) ? "Change/disable daily reminder" : "Enable daily reminder",
                 "Ask GPT-OSS (optional)"
         };
@@ -178,8 +183,10 @@ public final class MainActivity extends Activity {
                         case 4: chooseEpub(); break;
                         case 5: addPaperDialog(); break;
                         case 6: exportMarkers(); break;
-                        case 7: reminderDialog(); break;
-                        case 8: gptDialog(); break;
+                        case 7: chooseCompleteBackup(); break;
+                        case 8: chooseCompleteRestore(); break;
+                        case 9: reminderDialog(); break;
+                        case 10: gptDialog(); break;
                     }
                 }).setNegativeButton("Close", null).show();
     }
@@ -218,7 +225,7 @@ public final class MainActivity extends Activity {
     }
 
     private void scanSavedFolders(boolean explicit) {
-        if (scanRunning) return;
+        if (scanRunning || backupRunning) return;
         SharedPreferences p = getPreferences(MODE_PRIVATE);
         Set<String> books = new HashSet<>(p.getStringSet("book_trees",
                 java.util.Collections.emptySet()));
@@ -294,6 +301,20 @@ public final class MainActivity extends Activity {
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         if (request == EXPORT_MARKERS) {
             exportTo(data.getData());
+            return;
+        }
+        if (request == EXPORT_COMPLETE) {
+            performCompleteBackup(data.getData(), false);
+            return;
+        }
+        if (request == RESTORE_COMPLETE) {
+            new AlertDialog.Builder(this).setTitle("Restore into an empty library only?")
+                    .setMessage("Restore checks every book and database record before adding anything. " +
+                            "It will REFUSE to overwrite existing reading data. " +
+                            "Do not uninstall any older differently signed app until you have verified a complete export.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Validate and restore", (d, w) ->
+                            performCompleteBackup(data.getData(), true)).show();
             return;
         }
         if (request == PICK_BOOK_FOLDER || request == PICK_BACKUP_FOLDER) {
@@ -373,6 +394,57 @@ public final class MainActivity extends Activity {
             }
         } catch (Exception ignored) { }
         return "Untitled";
+    }
+
+    private void chooseCompleteBackup() {
+        if (scanRunning || backupRunning) {
+            Toast.makeText(this, "Another library operation is running", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/zip");
+        intent.putExtra(Intent.EXTRA_TITLE, "remind-me-to-read-complete.zip");
+        startActivityForResult(intent, EXPORT_COMPLETE);
+    }
+
+    private void chooseCompleteRestore() {
+        if (scanRunning || backupRunning) {
+            Toast.makeText(this, "Another library operation is running", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        startActivityForResult(intent, RESTORE_COMPLETE);
+    }
+
+    private void performCompleteBackup(Uri uri, boolean restoring) {
+        if (backupRunning || scanRunning) {
+            Toast.makeText(this, "Another library operation is running", Toast.LENGTH_LONG).show();
+            return;
+        }
+        backupRunning = true;
+        scanMessage = restoring ? "Checking complete backup…" : "Writing and verifying complete ZIP backup…";
+        showHome();
+        new Thread(() -> {
+            String message;
+            try {
+                int books = restoring ? PortableBackup.restore(this, uri)
+                        : PortableBackup.export(this, uri);
+                message = (restoring ? "Restored " : "Verified backup of ") + books +
+                        " books, including bookmarks, positions, sessions and ReadEra records.";
+            } catch (Exception ex) {
+                message = (restoring ? "Restore refused: " : "Backup NOT verified: ") + ex.getMessage();
+            }
+            final String report = message;
+            runOnUiThread(() -> {
+                backupRunning = false;
+                scanMessage = report;
+                if (!isFinishing() && !isDestroyed()) showHome();
+                new AlertDialog.Builder(this).setMessage(report).setPositiveButton("OK", null).show();
+            });
+        }, restoring ? "complete-restore" : "complete-export").start();
     }
 
     private void exportMarkers() {
