@@ -357,6 +357,11 @@ public final class PortableBackup {
         }
     }
 
+    /** Pure-file validation entrypoint for independent hostile ZIP fixtures. */
+    static void verifyArchiveForTest(File zip, File stagingDirectory) throws Exception {
+        inspect(zip, stagingDirectory);
+    }
+
     private static boolean blank(SQLiteDatabase db) {
         for (String table : TABLES) {
             try (Cursor c = db.rawQuery("SELECT COUNT(*) FROM " + table, null)) {
