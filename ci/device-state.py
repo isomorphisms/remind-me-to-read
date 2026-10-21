@@ -59,6 +59,15 @@ def examine(tar_path):
                                connection.execute(f"SELECT * FROM {table} ORDER BY {key}")]
         finally:
             connection.close()
+        # Every saved EPUB/TXT path must have actual bytes in the archive.
+        for book in rows["books"]:
+            if book["kind"] != 1:
+                source_path = book["epub_path"]
+                if not source_path:
+                    raise ValueError("Digital book has no private source path")
+                basename = pathlib.PurePosixPath(source_path).name
+                if "files/epubs/" + basename not in file_hashes:
+                    raise ValueError("Missing backed-up bytes for book id " + str(book["id"]))
         state = {"tables": rows, "book_sha256": file_hashes}
         return state
 
@@ -84,8 +93,13 @@ def digest(state):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--verify-legacy":
+        state = examine(sys.argv[2])
+        print(f"verified_legacy_archive_state_sha256={digest(state)}")
+        print(f"books={len(state['tables']['books'])} private_files={len(state['book_sha256'])}")
+        return
     if len(sys.argv) not in (2, 3):
-        raise SystemExit("Usage: device-state.py BEFORE.tar [AFTER.tar]")
+        raise SystemExit("Usage: device-state.py BEFORE.tar [AFTER.tar] | --verify-legacy ARCHIVE.tar")
     before = examine(sys.argv[1])
     require_seed(before)
     print(f"before_state_sha256={digest(before)}")
