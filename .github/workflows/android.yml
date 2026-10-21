@@ -77,6 +77,19 @@ jobs:
       - name: Independently check both APK certificate identities
         shell: bash
         run: bash ci/verify-signer.sh app/build/outputs/apk/stableDev signing-receipt.txt
+      # The independent AI-CI registry is authoritative for finished APKs.
+      # This intentionally fails until the protected signer fingerprint is
+      # registered for this package and the action is repinned to that commit.
+      - name: AI-CI verify C67 APK signer
+        uses: isomorphisms/ai-ci/android-signing@837d0a214c82c7be01cd25d5c114ee8057025f5c
+        with:
+          apk: app/build/outputs/apk/stableDev/app-arm64-v8a-stableDev.apk
+          lane: test
+      - name: AI-CI verify A1 APK signer
+        uses: isomorphisms/ai-ci/android-signing@837d0a214c82c7be01cd25d5c114ee8057025f5c
+        with:
+          apk: app/build/outputs/apk/stableDev/app-armeabi-v7a-stableDev.apk
+          lane: test
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: remind-me-to-read-stable-dev-apks
