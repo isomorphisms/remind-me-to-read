@@ -31,6 +31,8 @@ jobs:
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
       - name: Host-only signer continuity adversarial controls
         run: python3 -m unittest discover -s ci -p 'test_*.py' -v
+      - name: Disposable signing-smoke — real ABI APKs, NEVER published
+        run: bash ci/smoke-ephemeral-sign.sh
       # No ephemeral debug-key artifact is published. A green test is not an upgrade proof.
 
   sign:
