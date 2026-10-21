@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 HEX = re.compile(r"[0-9a-f]{64}\Z")
+GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 ABIS = {"arm64-v8a", "armeabi-v7a"}
 
 
@@ -27,7 +28,9 @@ def parse_receipt(path, directory=None, run_id=None, source_sha=None):
                   "apk_sha256", "cert_sha256"}
         if len(items) != len(needed) or set(row) != needed:
             raise ValueError("missing, duplicate, or unexpected receipt field")
-        for name in ("source_sha", "apk_sha256", "cert_sha256"):
+        if not GIT_SHA.fullmatch(row["source_sha"]):
+            raise ValueError("Source git revision must be 40 hex characters")
+        for name in ("apk_sha256", "cert_sha256"):
             if not HEX.fullmatch(row[name]):
                 raise ValueError(f"invalid {name}")
         if not row["run_id"].isdigit() or not row["run_attempt"].isdigit():
